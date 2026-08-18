@@ -1,0 +1,1229 @@
+import React, { useState, useEffect, useMemo } from 'react';
+import {
+  Home, CreditCard, PieChart as PieIcon, Target, Settings as SettingsIcon,
+  Plus, Award, Flame, Trash2, Edit3, Pin, Sparkles, X, Check, Wallet,
+  CalendarRange, Users, RotateCcw, ChevronDown, ChevronUp
+} from 'lucide-react';
+import {
+  PieChart, Pie, Cell, BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer,
+  CartesianGrid
+} from 'recharts';
+
+// ============================================================
+// HELPERS
+// ============================================================
+const STORAGE_KEY = 'finance-app-state-v1';
+const uid = (p = 'id') => `${p}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+const todayISO = () => new Date().toISOString().slice(0, 10);
+const addDaysISO = (iso, n) => {
+  const d = new Date(iso + 'T00:00:00');
+  d.setDate(d.getDate() + n);
+  return d.toISOString().slice(0, 10);
+};
+const daysBetweenInclusive = (aISO, bISO) =>
+  Math.round((new Date(bISO + 'T00:00:00') - new Date(aISO + 'T00:00:00')) / 86400000) + 1;
+const fmt = (n) => 'NT$ ' + Math.round(n || 0).toLocaleString();
+const STATUS_COLORS = { GREEN: '#10B981', YELLOW: '#F59E0B', RED: '#F43F5E' };
+const STATUS_LABEL = { GREEN: '正常', YELLOW: '注意', RED: '超支' };
+
+function goalColor(pct) {
+  if (pct >= 100) return { bar: '#D4AF37', text: '#B8860B', chip: '#FDF6E3' };
+  if (pct >= 75) return { bar: '#10B981', text: '#059669', chip: '#ECFDF5' };
+  if (pct >= 50) return { bar: '#FBBF24', text: '#B45309', chip: '#FFFBEB' };
+  if (pct >= 25) return { bar: '#FB923C', text: '#C2410C', chip: '#FFF7ED' };
+  return { bar: '#F43F5E', text: '#BE123C', chip: '#FFF1F2' };
+}
+
+// ============================================================
+// DEFAULT / SEED DATA
+// ============================================================
+const DEFAULT_ACCOUNTS = [
+  { id: 'acc-1', name: '主要帳戶' },
+  { id: 'acc-2', name: '現金' },
+  { id: 'acc-3', name: '悠遊卡' }
+];
+
+const DEFAULT_CATEGORIES = [
+  { id: 'cat-1', name: '餐飲', icon: '🍔', color: '#FF6B6B' },
+  { id: 'cat-2', name: '交通', icon: '🚇', color: '#4D96FF' },
+  { id: 'cat-3', name: '購物', icon: '🛍️', color: '#6BCB77' },
+  { id: 'cat-4', name: '娛樂', icon: '🎮', color: '#9D4EDD' },
+  { id: 'cat-5', name: '教育', icon: '📚', color: '#FFD93D' },
+  { id: 'cat-6', name: '居住', icon: '🏠', color: '#FF922B' },
+  { id: 'cat-7', name: '醫療', icon: '💊', color: '#20C997' },
+  { id: 'cat-8', name: '其他', icon: '📦', color: '#868E96' }
+];
+
+const DEFAULT_INCOME_CATEGORIES = [
+  { id: 'inc-1', name: '薪資', icon: '💰', color: '#28a745' },
+  { id: 'inc-2', name: '零用錢', icon: '💵', color: '#17a2b8' },
+  { id: 'inc-3', name: '獎金', icon: '🏆', color: '#ffc107' },
+  { id: 'inc-4', name: '其他', icon: '📥', color: '#6c757d' }
+];
+
+const DEFAULT_PURPOSES = ['Living', 'Travel', 'Education', 'Rent', 'Entertainment', 'Emergency Fund', 'Savings', 'Other'];
+
+const T = todayISO();
+const SEED_TRANSACTIONS = [
+  { id: uid('tx'), type: 'income', amount: 38000, category: '薪資', account: '主要帳戶', date: addDaysISO(T, -17), note: '八月份薪資', purpose: 'Living', important: false, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() },
+  { id: uid('tx'), type: 'expense', amount: 8000, category: '居住', account: '主要帳戶', date: addDaysISO(T, -16), note: '八月份房租', purpose: 'Rent', important: true, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() },
+  { id: uid('tx'), type: 'expense', amount: 150, category: '餐飲', account: '現金', date: T, note: '早午餐', purpose: 'Living', important: false, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() },
+  { id: uid('tx'), type: 'expense', amount: 45, category: '交通', account: '悠遊卡', date: T, note: '捷運通勤', purpose: 'Living', important: false, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() },
+  { id: uid('tx'), type: 'expense', amount: 3000, category: '醫療', account: '主要帳戶', date: addDaysISO(T, 7), note: '保險費', purpose: 'Living', important: true, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() }
+];
+
+const SEED_ALLOCATIONS = [
+  { id: uid('alloc'), amount: 12000, purpose: 'Living', startDate: addDaysISO(T, -17), endDate: addDaysISO(T, 13) }
+];
+
+const SEED_GOALS = [
+  { id: 'goal-1', name: '日本東京之旅', targetAmount: 30000, currentAmount: 12000, deadline: addDaysISO(T, 130), priority: 'High' },
+  { id: 'goal-2', name: '緊急預備金', targetAmount: 100000, currentAmount: 45000, deadline: addDaysISO(T, 310), priority: 'Medium' }
+];
+
+// ============================================================
+// BUDGET ENGINE
+// ============================================================
+function computeAllocation(alloc, transactions, today) {
+  const totalDays = daysBetweenInclusive(alloc.startDate, alloc.endDate);
+  const spent = transactions
+    .filter(t => t.type === 'expense' && t.purpose === alloc.purpose && t.date >= alloc.startDate && t.date <= alloc.endDate)
+    .reduce((s, t) => s + t.amount, 0);
+  const remainingMoney = alloc.amount - spent;
+  const isActive = today >= alloc.startDate && today <= alloc.endDate;
+  const clampedToday = today < alloc.startDate ? alloc.startDate : (today > alloc.endDate ? alloc.endDate : today);
+  const remainingDaysRaw = today > alloc.endDate ? 0 : daysBetweenInclusive(clampedToday, alloc.endDate);
+  const remainingDays = Math.max(remainingDaysRaw, 1);
+  const futureImportant = transactions
+    .filter(t => t.important && t.type === 'expense' && t.purpose === alloc.purpose && t.date > today && t.date <= alloc.endDate)
+    .reduce((s, t) => s + t.amount, 0);
+  const flexibleRemaining = Math.max(0, remainingMoney - futureImportant);
+  const dailyBudget = remainingDaysRaw > 0 ? Math.floor(flexibleRemaining / remainingDays) : 0;
+  const daysElapsed = Math.max(1, daysBetweenInclusive(alloc.startDate, clampedToday < alloc.startDate ? alloc.startDate : clampedToday));
+  const avgDaily = spent / daysElapsed;
+  const projectedTotal = avgDaily * totalDays;
+  let status = 'GREEN';
+  if (projectedTotal > alloc.amount * 1.05) status = 'RED';
+  else if (dailyBudget > 0 && avgDaily > dailyBudget * 1.15) status = 'YELLOW';
+  return { ...alloc, totalDays, spent, remainingMoney, remainingDays: remainingDaysRaw, futureImportant, flexibleRemaining, dailyBudget, daysElapsed, avgDaily, projectedTotal, status, isActive };
+}
+
+// ============================================================
+// ROOT APP
+// ============================================================
+export default function App() {
+  const [loaded, setLoaded] = useState(false);
+  const [activeTab, setActiveTab] = useState('home');
+  const [showTxModal, setShowTxModal] = useState(false);
+  const [editingTx, setEditingTx] = useState(null);
+  const [showSettingsModal, setShowSettingsModal] = useState(false);
+  const [selectedTxForView, setSelectedTxForView] = useState(null);
+  const [dialog, setDialog] = useState(null);
+
+  const [transactions, setTransactions] = useState(SEED_TRANSACTIONS);
+  const [categories, setCategories] = useState(DEFAULT_CATEGORIES);
+  const [incomeCategories, setIncomeCategories] = useState(DEFAULT_INCOME_CATEGORIES);
+  const [accounts, setAccounts] = useState(DEFAULT_ACCOUNTS);
+  const [purposes, setPurposes] = useState(DEFAULT_PURPOSES);
+  const [allocations, setAllocations] = useState(SEED_ALLOCATIONS);
+  const [goals, setGoals] = useState(SEED_GOALS);
+  const [rules, setRules] = useState({ rewardPct: 30, savingsPct: 50, carryOverPct: 20 });
+  const [rewardWallet, setRewardWallet] = useState({ balance: 0, history: [] });
+  const [savingsWallet, setSavingsWallet] = useState({ balance: 0, history: [] });
+  const [carryOverPool, setCarryOverPool] = useState(0);
+  const [gamification, setGamification] = useState({ xp: 0, streak: 0, lastActivityDate: null });
+  const [lastSettleDate, setLastSettleDate] = useState(null);
+
+  const today = todayISO();
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await window.storage.get(STORAGE_KEY);
+        if (res && res.value && !cancelled) {
+          const d = JSON.parse(res.value);
+          if (d.transactions) setTransactions(d.transactions);
+          if (d.categories) setCategories(d.categories);
+          if (d.incomeCategories) setIncomeCategories(d.incomeCategories);
+          if (d.accounts) setAccounts(d.accounts);
+          if (d.purposes) setPurposes(d.purposes);
+          if (d.allocations) setAllocations(d.allocations);
+          if (d.goals) setGoals(d.goals);
+          if (d.rules) setRules(d.rules);
+          if (d.rewardWallet) setRewardWallet(d.rewardWallet);
+          if (d.savingsWallet) setSavingsWallet(d.savingsWallet);
+          if (typeof d.carryOverPool === 'number') setCarryOverPool(d.carryOverPool);
+          if (d.gamification) setGamification(d.gamification);
+          if (d.lastSettleDate) setLastSettleDate(d.lastSettleDate);
+        }
+      } catch (e) {}
+      if (!cancelled) setLoaded(true);
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
+  useEffect(() => {
+    if (!loaded) return;
+    const payload = JSON.stringify({
+      transactions, categories, incomeCategories, accounts, purposes, allocations,
+      goals, rules, rewardWallet, savingsWallet, carryOverPool, gamification, lastSettleDate
+    });
+    const t = setTimeout(() => { window.storage.set(STORAGE_KEY, payload).catch(() => {}); }, 400);
+    return () => clearTimeout(t);
+  }, [loaded, transactions, categories, incomeCategories, accounts, purposes, allocations, goals, rules, rewardWallet, savingsWallet, carryOverPool, gamification, lastSettleDate]);
+
+  const askConfirm = (message, onOk) => setDialog({ message, onOk, onCancel: () => setDialog(null) });
+  const askAlert = (message) => setDialog({ message, onOk: null, onCancel: null });
+
+  const totalIncome = useMemo(() => transactions.filter(t => t.type === 'income').reduce((s, t) => s + t.amount, 0), [transactions]);
+  const totalExpense = useMemo(() => transactions.filter(t => t.type === 'expense').reduce((s, t) => s + t.amount, 0), [transactions]);
+  const availableBalance = totalIncome - totalExpense;
+
+  const allocationsComputed = useMemo(() => allocations.map(a => computeAllocation(a, transactions, today)), [allocations, transactions, today]);
+  const activeAllocations = allocationsComputed.filter(a => a.isActive);
+  const baseTodayBudget = activeAllocations.reduce((s, a) => s + a.dailyBudget, 0);
+  const todayBudgetTotal = baseTodayBudget + carryOverPool;
+  const todaySpending = useMemo(() => transactions.filter(t => t.type === 'expense' && t.date === today).reduce((s, t) => s + t.amount, 0), [transactions, today]);
+  const todayRemaining = todayBudgetTotal - todaySpending;
+  const settledToday = lastSettleDate === today;
+
+  const worstStatus = activeAllocations.reduce((worst, a) => {
+    const order = { GREEN: 0, YELLOW: 1, RED: 2 };
+    return order[a.status] > order[worst] ? a.status : worst;
+  }, 'GREEN');
+
+  const importantExpenses = useMemo(() => transactions.filter(t => t.important && t.type === 'expense'), [transactions]);
+
+  const registerPurpose = (p) => {
+    if (p && !purposes.includes(p)) setPurposes(prev => [...prev, p]);
+  };
+
+  const bumpActivity = () => {
+    setGamification(g => {
+      if (g.lastActivityDate === today) return { ...g, xp: g.xp + 10 };
+      const wasYesterday = g.lastActivityDate === addDaysISO(today, -1);
+      return { xp: g.xp + 10, streak: wasYesterday ? g.streak + 1 : 1, lastActivityDate: today };
+    });
+  };
+
+  const handleSaveTransaction = (data, id) => {
+    registerPurpose(data.purpose);
+    if (id) {
+      setTransactions(prev => prev.map(t => t.id === id ? { ...t, ...data, updatedAt: new Date().toISOString() } : t));
+    } else {
+      const tx = { id: uid('tx'), createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), ...data };
+      setTransactions(prev => [tx, ...prev]);
+      bumpActivity();
+    }
+    setShowTxModal(false);
+    setEditingTx(null);
+  };
+
+  const handleDeleteTransaction = (id) => {
+    askConfirm('確定要刪除這筆交易嗎？此操作無法復原。', () => {
+      setTransactions(prev => prev.filter(t => t.id !== id));
+      setSelectedTxForView(null);
+      setDialog(null);
+    });
+  };
+
+  const handleTogglePin = (id) => {
+    setTransactions(prev => prev.map(t => t.id === id ? { ...t, important: !t.important } : t));
+  };
+
+  const handleAddGoal = (name, targetAmount) => {
+    setGoals(prev => [...prev, { id: uid('goal'), name, targetAmount, currentAmount: 0, deadline: addDaysISO(today, 90), priority: 'Medium' }]);
+  };
+
+  const handleDeleteGoal = (id) => {
+    askConfirm('確定要刪除這個目標嗎？此操作無法復原。', () => {
+      setGoals(prev => prev.filter(g => g.id !== id));
+      setDialog(null);
+    });
+  };
+
+  const handleSettleToday = () => {
+    if (settledToday) return;
+    const leftover = todayBudgetTotal - todaySpending;
+    if (leftover <= 0) {
+      setCarryOverPool(0);
+      setLastSettleDate(today);
+      askAlert('今天沒有剩餘預算可以分配（可能已超支），結轉金額歸零。');
+      return;
+    }
+    const rewardAmt = Math.round(leftover * rules.rewardPct / 100);
+    const savingsAmt = Math.round(leftover * rules.savingsPct / 100);
+    const carryAmt = Math.max(0, leftover - rewardAmt - savingsAmt);
+    setRewardWallet(w => ({ balance: w.balance + rewardAmt, history: [{ date: today, amount: rewardAmt }, ...w.history].slice(0, 30) }));
+    setSavingsWallet(w => ({ balance: w.balance + savingsAmt, history: [{ date: today, amount: savingsAmt }, ...w.history].slice(0, 30) }));
+    setCarryOverPool(carryAmt);
+    setGamification(g => ({ ...g, xp: g.xp + 20 }));
+    setLastSettleDate(today);
+  };
+
+  const handleResetAll = () => {
+    askConfirm('確定要清除所有資料並回復成預設範例嗎？此操作無法復原。', async () => {
+      try { await window.storage.delete(STORAGE_KEY); } catch (e) {}
+      setTransactions(SEED_TRANSACTIONS);
+      setCategories(DEFAULT_CATEGORIES);
+      setIncomeCategories(DEFAULT_INCOME_CATEGORIES);
+      setAccounts(DEFAULT_ACCOUNTS);
+      setPurposes(DEFAULT_PURPOSES);
+      setAllocations(SEED_ALLOCATIONS);
+      setGoals(SEED_GOALS);
+      setRules({ rewardPct: 30, savingsPct: 50, carryOverPct: 20 });
+      setRewardWallet({ balance: 0, history: [] });
+      setSavingsWallet({ balance: 0, history: [] });
+      setCarryOverPool(0);
+      setGamification({ xp: 0, streak: 0, lastActivityDate: null });
+      setLastSettleDate(null);
+      setDialog(null);
+    });
+  };
+
+  if (!loaded) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-[#F8F9FA] max-w-md mx-auto">
+        <span className="text-sm text-gray-400">載入中…</span>
+      </div>
+    );
+  }
+
+  return (
+    <div className="min-h-screen bg-[#F8F9FA] text-[#212529] font-sans pb-24 max-w-md mx-auto relative shadow-2xl overflow-hidden flex flex-col border border-gray-100">
+      <header className="px-6 pt-6 pb-4 flex justify-between items-center bg-white border-b border-gray-100 sticky top-0 z-20">
+        <div>
+          <span className="text-xs font-semibold text-gray-400 uppercase tracking-wider">Smart Finance</span>
+          <h1 className="text-xl font-bold text-gray-900 tracking-tight">個人理財管理</h1>
+        </div>
+        <div className="flex items-center gap-3">
+          <div className="flex items-center bg-amber-50 px-2.5 py-1 rounded-full border border-amber-200">
+            <Flame className="w-4 h-4 text-amber-500 mr-1" />
+            <span className="text-xs font-bold text-amber-700">{gamification.streak} 天</span>
+          </div>
+          <button onClick={() => setShowSettingsModal(true)} className="p-2 rounded-full hover:bg-gray-100 transition text-gray-600">
+            <SettingsIcon className="w-5 h-5" />
+          </button>
+        </div>
+      </header>
+
+      <main className="flex-1 overflow-y-auto">
+        {activeTab === 'home' && (
+          <HomeView
+            availableBalance={availableBalance}
+            totalExpense={totalExpense}
+            todayBudgetTotal={todayBudgetTotal}
+            todaySpending={todaySpending}
+            todayRemaining={todayRemaining}
+            worstStatus={worstStatus}
+            importantExpenses={importantExpenses}
+            rewardWallet={rewardWallet}
+            savingsWallet={savingsWallet}
+            carryOverPool={carryOverPool}
+            goals={goals}
+            onAddGoal={handleAddGoal}
+            onDeleteGoal={handleDeleteGoal}
+            settledToday={settledToday}
+            onSettleToday={handleSettleToday}
+            transactions={transactions}
+            today={today}
+            onSelectTx={setSelectedTxForView}
+          />
+        )}
+
+        {activeTab === 'transactions' && (
+          <TransactionsView
+            transactions={transactions}
+            onOpenAdd={() => { setEditingTx(null); setShowTxModal(true); }}
+            onSelectTx={setSelectedTxForView}
+            today={today}
+          />
+        )}
+
+        {activeTab === 'analysis' && (
+          <AnalysisView transactions={transactions} categories={categories} incomeCategories={incomeCategories} today={today} />
+        )}
+
+        {activeTab === 'goals' && (
+          <GoalsView goals={goals} setGoals={setGoals} onAddGoal={handleAddGoal} onDeleteGoal={handleDeleteGoal} savingsWallet={savingsWallet} setSavingsWallet={setSavingsWallet} askAlert={askAlert} />
+        )}
+      </main>
+
+      <nav className="absolute bottom-0 left-0 right-0 bg-white/90 backdrop-blur-md border-t border-gray-200 px-4 py-2 flex justify-around items-center z-30">
+        <NavItem icon={<Home className="w-5 h-5" />} label="首頁" active={activeTab === 'home'} onClick={() => setActiveTab('home')} />
+        <NavItem icon={<CreditCard className="w-5 h-5" />} label="明細" active={activeTab === 'transactions'} onClick={() => setActiveTab('transactions')} />
+        <button onClick={() => { setEditingTx(null); setShowTxModal(true); }} className="bg-black text-white p-3 rounded-full shadow-lg hover:scale-105 active:scale-95 transition flex items-center justify-center -mt-6 border-4 border-[#F8F9FA]">
+          <Plus className="w-6 h-6" />
+        </button>
+        <NavItem icon={<PieIcon className="w-5 h-5" />} label="分析" active={activeTab === 'analysis'} onClick={() => setActiveTab('analysis')} />
+        <NavItem icon={<Target className="w-5 h-5" />} label="目標" active={activeTab === 'goals'} onClick={() => setActiveTab('goals')} />
+      </nav>
+
+      {showTxModal && (
+        <TransactionFormModal
+          initial={editingTx}
+          categories={categories}
+          incomeCategories={incomeCategories}
+          accounts={accounts}
+          purposes={purposes}
+          onClose={() => { setShowTxModal(false); setEditingTx(null); }}
+          onSave={handleSaveTransaction}
+        />
+      )}
+
+      {selectedTxForView && (
+        <TransactionDetailModal
+          tx={selectedTxForView}
+          onClose={() => setSelectedTxForView(null)}
+          onDelete={handleDeleteTransaction}
+          onTogglePin={handleTogglePin}
+          onEdit={(tx) => { setSelectedTxForView(null); setEditingTx(tx); setShowTxModal(true); }}
+        />
+      )}
+
+      {showSettingsModal && (
+        <SettingsModal
+          rules={rules} setRules={setRules}
+          categories={categories} setCategories={setCategories}
+          incomeCategories={incomeCategories} setIncomeCategories={setIncomeCategories}
+          accounts={accounts} setAccounts={setAccounts}
+          purposes={purposes} setPurposes={setPurposes}
+          allocations={allocationsComputed} setAllocations={setAllocations}
+          gamification={gamification}
+          onClose={() => setShowSettingsModal(false)}
+          onResetAll={handleResetAll}
+          askAlert={askAlert}
+        />
+      )}
+
+      {dialog && <DialogModal dialog={dialog} onClose={() => setDialog(null)} />}
+    </div>
+  );
+}
+
+function NavItem({ icon, label, active, onClick }) {
+  return (
+    <button onClick={onClick} className={`flex flex-col items-center justify-center py-1 px-3 rounded-xl transition ${active ? 'text-black font-semibold' : 'text-gray-400 hover:text-gray-600'}`}>
+      {icon}
+      <span className="text-[10px] mt-1">{label}</span>
+    </button>
+  );
+}
+
+function DialogModal({ dialog, onClose }) {
+  return (
+    <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-[60] flex items-center justify-center p-6">
+      <div className="bg-white w-full max-w-xs rounded-2xl p-5 space-y-4 shadow-xl">
+        <p className="text-sm text-gray-800 leading-relaxed">{dialog.message}</p>
+        <div className="flex justify-end gap-2">
+          {dialog.onCancel && (
+            <button onClick={() => { dialog.onCancel(); onClose(); }} className="px-3 py-1.5 text-xs font-medium text-gray-500">取消</button>
+          )}
+          <button
+            onClick={() => { if (dialog.onOk) dialog.onOk(); else onClose(); }}
+            className="px-4 py-1.5 bg-black text-white text-xs rounded-xl font-medium"
+          >
+            確定
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function HomeView({ availableBalance, totalExpense, todayBudgetTotal, todaySpending, todayRemaining, worstStatus, importantExpenses, rewardWallet, savingsWallet, carryOverPool, goals, onAddGoal, onDeleteGoal, settledToday, onSettleToday, transactions, today, onSelectTx }) {
+  const [showAddGoal, setShowAddGoal] = useState(false);
+  const [goalName, setGoalName] = useState('');
+  const [goalTarget, setGoalTarget] = useState('');
+
+  const todayTx = useMemo(() => transactions.filter(t => t.date === today).sort((a, b) => b.createdAt.localeCompare(a.createdAt)), [transactions, today]);
+
+  const submitGoal = (e) => {
+    e.preventDefault();
+    const amt = Number(goalTarget);
+    if (!goalName.trim() || !amt || amt <= 0) return;
+    onAddGoal(goalName.trim(), amt);
+    setGoalName(''); setGoalTarget(''); setShowAddGoal(false);
+  };
+
+  return (
+    <div className="p-6 space-y-6">
+      <div className="grid grid-cols-2 gap-4">
+        <div className="bg-white p-4 rounded-2xl shadow-sm border border-gray-100 flex flex-col justify-between">
+          <span className="text-[11px] font-medium text-gray-400">目前可用資金</span>
+          <span className="text-xl font-bold tracking-tight text-emerald-600 mt-2">{fmt(availableBalance)}</span>
+        </div>
+        <div className="bg-white p-4 rounded-2xl shadow-sm border border-gray-100 flex flex-col justify-between">
+          <span className="text-[11px] font-medium text-gray-400">累計總支出</span>
+          <span className="text-xl font-bold tracking-tight text-rose-500 mt-2">− {fmt(totalExpense)}</span>
+        </div>
+        <div className="p-4 rounded-2xl border border-amber-200/70 flex flex-col justify-between" style={{ backgroundColor: '#FFFBEB' }}>
+          <div className="flex items-center gap-1.5">
+            <Award className="w-3.5 h-3.5 text-amber-500" />
+            <span className="text-[11px] font-medium text-amber-600">獎勵錢包</span>
+          </div>
+          <span className="text-xl font-bold tracking-tight mt-2" style={{ color: '#B8860B' }}>{fmt(rewardWallet.balance)}</span>
+        </div>
+        <div className="bg-blue-50 p-4 rounded-2xl border border-blue-100 flex flex-col justify-between">
+          <div className="flex items-center gap-1.5">
+            <Wallet className="w-3.5 h-3.5 text-blue-500" />
+            <span className="text-[11px] font-medium text-blue-600">儲蓄錢包</span>
+          </div>
+          <span className="text-xl font-bold tracking-tight text-blue-700 mt-2">{fmt(savingsWallet.balance)}</span>
+        </div>
+      </div>
+
+      <div className="bg-indigo-50 border border-indigo-100 p-6 rounded-3xl relative overflow-hidden">
+        <div className="flex justify-between items-start">
+          <div>
+            <span className="text-xs text-indigo-400 uppercase tracking-widest font-semibold">今日預算</span>
+            <h3 className="text-3xl font-extrabold mt-1 text-indigo-950">{fmt(todayBudgetTotal)}</h3>
+            {carryOverPool > 0 && <span className="text-[10px] text-indigo-400">含昨日結轉 {fmt(carryOverPool)}</span>}
+          </div>
+          <div className="text-right">
+            <span className="text-xs text-indigo-400 uppercase tracking-widest font-semibold">今日剩餘</span>
+            <p className={`text-xl font-bold mt-1 ${todayRemaining >= 0 ? 'text-emerald-600' : 'text-rose-500'}`}>{fmt(todayRemaining)}</p>
+          </div>
+        </div>
+        <div className="mt-4 pt-4 border-t border-indigo-100 flex justify-between items-center text-xs text-indigo-400">
+          <span>依實際資金分配動態計算</span>
+          <span className="px-2 py-0.5 rounded-full font-medium" style={{ backgroundColor: STATUS_COLORS[worstStatus] + '22', color: STATUS_COLORS[worstStatus] }}>
+            狀態：{STATUS_LABEL[worstStatus]}
+          </span>
+        </div>
+        {!settledToday ? (
+          <button onClick={onSettleToday} className="mt-4 w-full bg-indigo-600 hover:bg-indigo-700 transition text-white text-xs py-2.5 rounded-xl font-semibold">
+            結算今日餘額 → 分配獎勵 / 儲蓄 / 結轉
+          </button>
+        ) : (
+          <div className="mt-4 w-full text-center text-emerald-600 text-xs py-2">✓ 今日已結算</div>
+        )}
+      </div>
+
+      <div className="space-y-2">
+        <h4 className="text-sm font-bold text-gray-800">今日收支</h4>
+        {todayTx.length === 0 ? (
+          <p className="text-xs text-gray-400 bg-white border border-gray-100 rounded-2xl p-4 text-center">今天還沒有任何交易紀錄</p>
+        ) : (
+          <div className="space-y-2">
+            {todayTx.map(t => {
+              const isIncome = t.type === 'income';
+              return (
+                <div key={t.id} onClick={() => onSelectTx(t)} className="bg-white p-3.5 rounded-2xl border border-gray-100 shadow-sm flex justify-between items-center cursor-pointer hover:border-gray-200 transition">
+                  <div className="flex items-center gap-3">
+                    <div className={`w-9 h-9 rounded-xl flex items-center justify-center text-sm ${isIncome ? 'bg-emerald-50 text-emerald-600' : 'bg-gray-50 text-gray-700'}`}>{isIncome ? '💰' : '🏷️'}</div>
+                    <div>
+                      <h5 className="font-semibold text-gray-900 text-xs">{t.note || t.category}</h5>
+                      <span className="text-[10px] text-gray-400">{t.category}</span>
+                    </div>
+                  </div>
+                  <span className={`font-bold text-xs ${isIncome ? 'text-emerald-600' : 'text-gray-900'}`}>{isIncome ? '+' : '−'} {fmt(t.amount)}</span>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+
+      {importantExpenses.length > 0 && (
+        <div className="space-y-3">
+          <h4 className="text-sm font-bold text-gray-800 flex items-center gap-1.5"><Pin className="w-4 h-4 text-amber-500" /> 釘選重要支出</h4>
+          <div className="space-y-2">
+            {importantExpenses.map(item => (
+              <div key={item.id} onClick={() => onSelectTx(item)} className="bg-white p-4 rounded-2xl border border-gray-100 shadow-sm flex justify-between items-center cursor-pointer hover:border-gray-200 transition">
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 rounded-xl bg-amber-50 text-amber-600 flex items-center justify-center font-bold">📌</div>
+                  <div>
+                    <h5 className="font-semibold text-gray-900 text-sm">{item.note || item.category}</h5>
+                    <span className="text-xs text-gray-400">{item.date} · {item.purpose}</span>
+                  </div>
+                </div>
+                <span className="font-bold text-rose-500">− {fmt(item.amount)}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      <div className="space-y-3">
+        <div className="flex justify-between items-center">
+          <h4 className="text-sm font-bold text-gray-800">財務目標進度</h4>
+          <button onClick={() => setShowAddGoal(v => !v)} className="text-gray-400 hover:text-gray-700 transition p-1">
+            <Plus className="w-4 h-4" />
+          </button>
+        </div>
+
+        {showAddGoal && (
+          <form onSubmit={submitGoal} className="bg-white p-4 rounded-2xl border border-gray-100 shadow-sm space-y-2">
+            <input type="text" placeholder="目標名稱" value={goalName} onChange={e => setGoalName(e.target.value)} className="w-full p-2.5 bg-gray-50 rounded-xl text-xs border border-gray-200 outline-none" />
+            <input type="number" min="1" placeholder="目標金額 (NT$)" value={goalTarget} onChange={e => setGoalTarget(e.target.value)} className="w-full p-2.5 bg-gray-50 rounded-xl text-xs border border-gray-200 outline-none" />
+            <div className="flex justify-end gap-2">
+              <button type="button" onClick={() => setShowAddGoal(false)} className="px-3 py-1.5 text-xs text-gray-500 font-medium">取消</button>
+              <button type="submit" className="px-4 py-1.5 bg-black text-white text-xs rounded-xl font-medium">新增</button>
+            </div>
+          </form>
+        )}
+
+        {goals.map(g => {
+          const pct = g.targetAmount ? Math.min(100, Math.round((g.currentAmount / g.targetAmount) * 100)) : 0;
+          const c = goalColor(pct);
+          return (
+            <div key={g.id} className="bg-white p-4 rounded-2xl border border-gray-100 shadow-sm space-y-2">
+              <div className="flex justify-between items-center text-sm">
+                <span className="font-semibold text-gray-900 flex items-center gap-1">{g.name} {pct >= 100 && '🎉'}</span>
+                <div className="flex items-center gap-2">
+                  <span className="text-xs font-bold px-2 py-0.5 rounded-full" style={{ backgroundColor: c.chip, color: c.text }}>{pct}%</span>
+                  <button onClick={() => onDeleteGoal(g.id)} className="text-gray-300 hover:text-rose-500 transition"><Trash2 className="w-3.5 h-3.5" /></button>
+                </div>
+              </div>
+              <span className="text-xs text-gray-500 font-medium block">{fmt(g.currentAmount)} / {fmt(g.targetAmount)}</span>
+              <div className="w-full bg-gray-100 h-2 rounded-full overflow-hidden">
+                <div className="h-full rounded-full transition-all duration-500" style={{ width: `${pct}%`, backgroundColor: c.bar }}></div>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function TransactionsView({ transactions, onOpenAdd, onSelectTx, today }) {
+  const [filter, setFilter] = useState('all');
+
+  const filtered = useMemo(() => {
+    if (filter === 'all') return transactions;
+    let start = today;
+    if (filter === 'week') start = addDaysISO(today, -6);
+    if (filter === 'month') start = today.slice(0, 8) + '01';
+    return transactions.filter(t => t.date >= start && t.date <= today);
+  }, [transactions, filter, today]);
+
+  const grouped = useMemo(() => {
+    const map = {};
+    filtered.forEach(t => { (map[t.date] = map[t.date] || []).push(t); });
+    return Object.entries(map).sort((a, b) => b[0].localeCompare(a[0]));
+  }, [filtered]);
+
+  return (
+    <div className="p-6 space-y-5">
+      <div className="flex justify-between items-center">
+        <h3 className="text-lg font-bold text-gray-900">所有交易明細</h3>
+        <button onClick={onOpenAdd} className="bg-black text-white text-xs px-3 py-2 rounded-xl font-medium flex items-center gap-1 shadow-sm hover:bg-gray-800 transition">
+          <Plus className="w-4 h-4" /> 新增交易
+        </button>
+      </div>
+
+      <div className="flex gap-2">
+        {[['all', '全部'], ['today', '今天'], ['week', '近 7 天'], ['month', '本月']].map(([k, label]) => (
+          <button key={k} onClick={() => setFilter(k)} className={`text-xs px-3 py-1.5 rounded-full font-medium transition ${filter === k ? 'bg-black text-white' : 'bg-white border border-gray-200 text-gray-500'}`}>
+            {label}
+          </button>
+        ))}
+      </div>
+
+      {grouped.length === 0 && <p className="text-xs text-gray-400 text-center py-10">這段期間沒有交易紀錄</p>}
+
+      {grouped.map(([date, txs]) => (
+        <div key={date} className="space-y-2">
+          <span className="text-[11px] font-bold text-gray-400 uppercase tracking-wider">{date === today ? '今天' : date}</span>
+          {txs.map(t => {
+            const isIncome = t.type === 'income';
+            return (
+              <div key={t.id} onClick={() => onSelectTx(t)} className="bg-white p-4 rounded-2xl border border-gray-100 shadow-sm flex justify-between items-center cursor-pointer hover:border-gray-200 transition">
+                <div className="flex items-center gap-3">
+                  <div className={`w-10 h-10 rounded-2xl flex items-center justify-center text-lg ${isIncome ? 'bg-emerald-50 text-emerald-600' : 'bg-gray-50 text-gray-700'}`}>
+                    {isIncome ? '💰' : '🏷️'}
+                  </div>
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <h5 className="font-semibold text-gray-900 text-sm">{t.note || t.category}</h5>
+                      {t.important && <span className="text-amber-500 text-xs">📌</span>}
+                    </div>
+                    <span className="text-xs text-gray-400">{t.category} · {t.account}</span>
+                  </div>
+                </div>
+                <span className={`font-bold text-sm ${isIncome ? 'text-emerald-600' : 'text-gray-900'}`}>{isIncome ? '+' : '−'} {fmt(t.amount)}</span>
+              </div>
+            );
+          })}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function AnalysisView({ transactions, categories, incomeCategories, today }) {
+  const [mode, setMode] = useState('month');
+  const [customStart, setCustomStart] = useState(addDaysISO(today, -13));
+  const [customEnd, setCustomEnd] = useState(today);
+  const [expanded, setExpanded] = useState(null);
+
+  const [start, end] = useMemo(() => {
+    if (mode === 'day') return [today, today];
+    if (mode === 'week') return [addDaysISO(today, -6), today];
+    if (mode === 'year') return [today.slice(0, 4) + '-01-01', today];
+    if (mode === 'custom') return [customStart, customEnd];
+    return [today.slice(0, 8) + '01', today];
+  }, [mode, today, customStart, customEnd]);
+
+  const filtered = transactions.filter(t => t.date >= start && t.date <= end);
+  const expenseTx = filtered.filter(t => t.type === 'expense');
+  const incomeTx = filtered.filter(t => t.type === 'income');
+  const curExpenseTotal = expenseTx.reduce((s, t) => s + t.amount, 0);
+  const curIncomeTotal = incomeTx.reduce((s, t) => s + t.amount, 0);
+  const lengthDays = daysBetweenInclusive(start, end);
+  const avgDaily = curExpenseTotal / lengthDays;
+
+  const categoryTotals = categories
+    .map(c => ({ name: c.name, color: c.color, icon: c.icon, value: expenseTx.filter(t => t.category === c.name).reduce((s, t) => s + t.amount, 0) }))
+    .filter(c => c.value > 0)
+    .sort((a, b) => b.value - a.value);
+
+  const incomeTotals = incomeCategories
+    .map(c => ({ name: c.name, icon: c.icon, value: incomeTx.filter(t => t.category === c.name).reduce((s, t) => s + t.amount, 0) }))
+    .filter(c => c.value > 0)
+    .sort((a, b) => b.value - a.value);
+
+  const dailyTrend = useMemo(() => {
+    const arr = [];
+    for (let i = 0; i < lengthDays; i++) {
+      const d = addDaysISO(start, i);
+      const amount = expenseTx.filter(t => t.date === d).reduce((s, t) => s + t.amount, 0);
+      arr.push({ date: d, amount });
+    }
+    return arr;
+  }, [start, lengthDays, expenseTx]);
+
+  const highestDay = dailyTrend.reduce((max, d) => d.amount > max.amount ? d : max, { date: '-', amount: 0 });
+
+  const prevEnd = addDaysISO(start, -1);
+  const prevStart = addDaysISO(prevEnd, -(lengthDays - 1));
+  const prevExpenseTotal = transactions.filter(t => t.type === 'expense' && t.date >= prevStart && t.date <= prevEnd).reduce((s, t) => s + t.amount, 0);
+  const change = prevExpenseTotal > 0 ? ((curExpenseTotal - prevExpenseTotal) / prevExpenseTotal) * 100 : (curExpenseTotal > 0 ? 100 : 0);
+
+  return (
+    <div className="p-6 space-y-6">
+      <h3 className="text-lg font-bold text-gray-900">財務分析</h3>
+
+      <div className="flex gap-2 flex-wrap">
+        {[['day', '今日'], ['week', '近 7 天'], ['month', '本月'], ['year', '今年'], ['custom', '自訂']].map(([k, label]) => (
+          <button key={k} onClick={() => setMode(k)} className={`text-xs px-3 py-1.5 rounded-full font-medium transition ${mode === k ? 'bg-black text-white' : 'bg-white border border-gray-200 text-gray-500'}`}>
+            {label}
+          </button>
+        ))}
+      </div>
+      {mode === 'custom' && (
+        <div className="flex gap-2 items-center text-xs">
+          <input type="date" value={customStart} onChange={e => setCustomStart(e.target.value)} className="p-2 bg-white border border-gray-200 rounded-lg" />
+          <span className="text-gray-400">～</span>
+          <input type="date" value={customEnd} onChange={e => setCustomEnd(e.target.value)} className="p-2 bg-white border border-gray-200 rounded-lg" />
+        </div>
+      )}
+
+      <div className="grid grid-cols-2 gap-4">
+        <div className="bg-white p-4 rounded-2xl border border-gray-100 shadow-sm">
+          <span className="text-xs text-gray-400">總收入</span>
+          <h4 className="text-lg font-bold text-emerald-600 mt-1">{fmt(curIncomeTotal)}</h4>
+        </div>
+        <div className="bg-white p-4 rounded-2xl border border-gray-100 shadow-sm">
+          <span className="text-xs text-gray-400">總支出</span>
+          <h4 className="text-lg font-bold text-rose-500 mt-1">{fmt(curExpenseTotal)}</h4>
+        </div>
+        <div className="bg-white p-4 rounded-2xl border border-gray-100 shadow-sm">
+          <span className="text-xs text-gray-400">平均每日支出</span>
+          <h4 className="text-sm font-bold text-gray-800 mt-1">{fmt(avgDaily)}</h4>
+        </div>
+        <div className="bg-white p-4 rounded-2xl border border-gray-100 shadow-sm">
+          <span className="text-xs text-gray-400">支出最高日</span>
+          <h4 className="text-sm font-bold text-gray-800 mt-1">{highestDay.date === '-' ? '—' : `${highestDay.date.slice(5)} · ${fmt(highestDay.amount)}`}</h4>
+        </div>
+      </div>
+
+      <div className="bg-white p-5 rounded-2xl border border-gray-100 shadow-sm space-y-2">
+        <h4 className="text-sm font-bold text-gray-800">本期 vs 上期</h4>
+        <div className="flex justify-between items-center text-sm">
+          <span className="text-gray-500">本期支出 {fmt(curExpenseTotal)}</span>
+          <span className={`font-bold ${change <= 0 ? 'text-emerald-600' : 'text-rose-500'}`}>{change >= 0 ? '+' : ''}{change.toFixed(1)}%</span>
+        </div>
+        <span className="text-[11px] text-gray-400">上一期（同長度 {lengthDays} 天）支出 {fmt(prevExpenseTotal)}</span>
+      </div>
+
+      {categoryTotals.length > 0 && (
+        <div className="bg-white p-5 rounded-2xl border border-gray-100 shadow-sm space-y-3">
+          <h4 className="text-sm font-bold text-gray-800">支出分類佔比</h4>
+          <ResponsiveContainer width="100%" height={200}>
+            <PieChart>
+              <Pie data={categoryTotals} dataKey="value" nameKey="name" innerRadius={50} outerRadius={80} paddingAngle={2}>
+                {categoryTotals.map((c, i) => <Cell key={i} fill={c.color} />)}
+              </Pie>
+              <Tooltip formatter={(v) => fmt(v)} />
+            </PieChart>
+          </ResponsiveContainer>
+          <div className="space-y-1">
+            {categoryTotals.map(c => {
+              const pct = Math.round((c.value / curExpenseTotal) * 100);
+              const isOpen = expanded === c.name;
+              return (
+                <div key={c.name}>
+                  <button onClick={() => setExpanded(isOpen ? null : c.name)} className="w-full flex justify-between items-center text-xs py-1.5">
+                    <span className="flex items-center gap-1.5">{c.icon} {c.name} · {pct}%</span>
+                    <span className="flex items-center gap-1 font-semibold">{fmt(c.value)} {isOpen ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}</span>
+                  </button>
+                  {isOpen && (
+                    <div className="pl-3 border-l-2 border-gray-100 space-y-1 mb-2">
+                      {expenseTx.filter(t => t.category === c.name).map(t => (
+                        <div key={t.id} className="flex justify-between text-[11px] text-gray-500">
+                          <span>{t.date} · {t.note || '無備註'}</span>
+                          <span>{fmt(t.amount)}</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      <div className="bg-white p-5 rounded-2xl border border-gray-100 shadow-sm space-y-3">
+        <h4 className="text-sm font-bold text-gray-800">每日支出趨勢</h4>
+        <ResponsiveContainer width="100%" height={160}>
+          <BarChart data={dailyTrend}>
+            <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" />
+            <XAxis dataKey="date" tick={{ fontSize: 9 }} tickFormatter={d => d.slice(5)} />
+            <YAxis tick={{ fontSize: 9 }} />
+            <Tooltip formatter={(v) => fmt(v)} />
+            <Bar dataKey="amount" fill="#111827" radius={[4, 4, 0, 0]} />
+          </BarChart>
+        </ResponsiveContainer>
+      </div>
+
+      {incomeTotals.length > 0 && (
+        <div className="bg-white p-5 rounded-2xl border border-gray-100 shadow-sm space-y-2">
+          <h4 className="text-sm font-bold text-gray-800">收入來源</h4>
+          {incomeTotals.map(c => (
+            <div key={c.name} className="flex justify-between text-xs py-1">
+              <span>{c.icon} {c.name}</span>
+              <span className="font-semibold text-emerald-600">{fmt(c.value)}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function GoalsView({ goals, setGoals, onAddGoal, onDeleteGoal, savingsWallet, setSavingsWallet, askAlert }) {
+  const [showAddGoal, setShowAddGoal] = useState(false);
+  const [name, setName] = useState('');
+  const [target, setTarget] = useState('');
+  const [contributions, setContributions] = useState({});
+
+  const handleCreateGoal = (e) => {
+    e.preventDefault();
+    const amt = Number(target);
+    if (!name.trim() || !amt || amt <= 0) return;
+    onAddGoal(name.trim(), amt);
+    setName(''); setTarget(''); setShowAddGoal(false);
+  };
+
+  const handleContribute = (goalId) => {
+    const amt = Number(contributions[goalId] || 0);
+    if (!amt || amt <= 0) return;
+    if (amt > savingsWallet.balance) { askAlert('儲蓄錢包餘額不足，無法投入這個金額。'); return; }
+    setSavingsWallet(w => ({ ...w, balance: w.balance - amt }));
+    setGoals(prev => prev.map(g => g.id === goalId ? { ...g, currentAmount: g.currentAmount + amt } : g));
+    setContributions(prev => ({ ...prev, [goalId]: '' }));
+  };
+
+  return (
+    <div className="p-6 space-y-6">
+      <div className="flex justify-between items-center">
+        <h3 className="text-lg font-bold text-gray-900">財務目標</h3>
+        <button onClick={() => setShowAddGoal(true)} className="bg-black text-white text-xs px-3 py-2 rounded-xl font-medium flex items-center gap-1 shadow-sm hover:bg-gray-800 transition">
+          <Plus className="w-4 h-4" /> 新增目標
+        </button>
+      </div>
+
+      <div className="bg-white p-4 rounded-2xl border border-gray-100 shadow-sm flex justify-between items-center">
+        <span className="text-xs text-gray-500 flex items-center gap-1.5"><Wallet className="w-4 h-4 text-blue-600" /> 儲蓄錢包可用餘額</span>
+        <span className="font-bold text-blue-600">{fmt(savingsWallet.balance)}</span>
+      </div>
+
+      {showAddGoal && (
+        <form onSubmit={handleCreateGoal} className="bg-white p-4 rounded-2xl border border-gray-100 shadow-sm space-y-3">
+          <h4 className="text-sm font-bold text-gray-800">建立新目標</h4>
+          <input type="text" placeholder="目標名稱" value={name} onChange={e => setName(e.target.value)} className="w-full p-3 bg-gray-50 rounded-xl text-sm border border-gray-200 outline-none" />
+          <input type="number" min="1" placeholder="目標金額 (NT$)" value={target} onChange={e => setTarget(e.target.value)} className="w-full p-3 bg-gray-50 rounded-xl text-sm border border-gray-200 outline-none" />
+          <div className="flex justify-end gap-2">
+            <button type="button" onClick={() => setShowAddGoal(false)} className="px-3 py-1.5 text-xs text-gray-500 font-medium">取消</button>
+            <button type="submit" className="px-4 py-1.5 bg-black text-white text-xs rounded-xl font-medium">儲存</button>
+          </div>
+        </form>
+      )}
+
+      <div className="space-y-4">
+        {goals.map(g => {
+          const pct = Math.min(100, Math.round((g.currentAmount / g.targetAmount) * 100));
+          const c = goalColor(pct);
+          return (
+            <div key={g.id} className="bg-white p-5 rounded-2xl border border-gray-100 shadow-sm space-y-3">
+              <div className="flex justify-between items-start">
+                <div>
+                  <h4 className="font-bold text-gray-900 text-sm flex items-center gap-1">{g.name} {pct >= 100 && '🎉'}</h4>
+                  <span className="text-xs text-gray-400">截止日期：{g.deadline}</span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <span className="text-xs bg-gray-100 px-2.5 py-1 rounded-full font-semibold">{g.priority}</span>
+                  <button onClick={() => onDeleteGoal(g.id)} className="text-gray-300 hover:text-rose-500 transition"><Trash2 className="w-3.5 h-3.5" /></button>
+                </div>
+              </div>
+              <div className="space-y-1">
+                <div className="flex justify-between text-xs font-semibold">
+                  <span>進度</span>
+                  <span style={{ color: c.text }}>{fmt(g.currentAmount)} / {fmt(g.targetAmount)} ({pct}%)</span>
+                </div>
+                <div className="w-full bg-gray-100 h-2.5 rounded-full overflow-hidden">
+                  <div className="h-full rounded-full transition-all duration-500" style={{ width: `${pct}%`, backgroundColor: c.bar }}></div>
+                </div>
+              </div>
+              <div className="flex gap-2">
+                <input type="number" min="1" placeholder="從儲蓄錢包投入金額" value={contributions[g.id] || ''} onChange={e => setContributions(prev => ({ ...prev, [g.id]: e.target.value }))} className="flex-1 p-2 bg-gray-50 rounded-xl text-xs border border-gray-200 outline-none" />
+                <button onClick={() => handleContribute(g.id)} className="px-3 py-2 bg-blue-50 text-blue-700 text-xs font-semibold rounded-xl hover:bg-blue-100 transition">存入</button>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function parseNlp(text, categories) {
+  const amtMatch = text.match(/(\d+(?:\.\d+)?)/);
+  if (!amtMatch) return null;
+  const amount = Number(amtMatch[1]);
+  const matchedCat = categories.find(c => text.includes(c.name));
+  const note = text.replace(amtMatch[0], '').trim() || (matchedCat ? matchedCat.name : '支出');
+  return { amount, category: matchedCat ? matchedCat.name : categories[0].name, note };
+}
+
+function TransactionFormModal({ initial, categories, incomeCategories, accounts, purposes, onClose, onSave }) {
+  const isEdit = !!initial;
+  const [type, setType] = useState(initial?.type || 'expense');
+  const [amount, setAmount] = useState(initial ? String(initial.amount) : '');
+  const [category, setCategory] = useState(initial?.category || categories[0].name);
+  const [account, setAccount] = useState(initial?.account || accounts[0]?.name || '');
+  const [date, setDate] = useState(initial?.date || todayISO());
+  const [note, setNote] = useState(initial?.note || '');
+  const [purpose, setPurpose] = useState(initial?.purpose || purposes[0]);
+  const [important, setImportant] = useState(initial?.important || false);
+  const [error, setError] = useState('');
+
+  const [nlpInput, setNlpInput] = useState('');
+  const [nlpParsed, setNlpParsed] = useState(null);
+  const [nlpError, setNlpError] = useState('');
+
+  const activeCategories = type === 'expense' ? categories : incomeCategories;
+
+  useEffect(() => {
+    if (!activeCategories.find(c => c.name === category)) setCategory(activeCategories[0]?.name || '');
+  }, [type]);
+
+  const validateAndBuild = () => {
+    const amt = Number(amount);
+    if (!amount || isNaN(amt) || amt <= 0) { setError('請輸入大於 0 的金額'); return null; }
+    if (!date) { setError('請選擇日期'); return null; }
+    if (!category) { setError('請選擇分類'); return null; }
+    setError('');
+    return { type, amount: amt, category, account, date, note, purpose, important };
+  };
+
+  const handleSubmit = (e) => {
+    e.preventDefault();
+    const data = validateAndBuild();
+    if (!data) return;
+    onSave(data, initial?.id);
+  };
+
+  const handleNlpParse = () => {
+    const parsed = parseNlp(nlpInput, categories);
+    if (!parsed) { setNlpError('無法辨識金額，請用類似「午餐 120」的格式，或直接手動輸入下方欄位。'); setNlpParsed(null); return; }
+    setNlpError('');
+    setNlpParsed(parsed);
+  };
+
+  const handleNlpConfirm = () => {
+    if (!nlpParsed) return;
+    onSave({ type: 'expense', amount: nlpParsed.amount, category: nlpParsed.category, account: accounts[0]?.name || '', date: todayISO(), note: nlpParsed.note, purpose: purposes[0], important: false });
+  };
+
+  return (
+    <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-end sm:items-center justify-center p-0 sm:p-4">
+      <div className="bg-white w-full max-w-md rounded-t-3xl sm:rounded-3xl p-6 space-y-5 max-h-[90vh] overflow-y-auto">
+        <div className="flex justify-between items-center">
+          <h3 className="font-bold text-gray-900 text-base">{isEdit ? '編輯交易' : '快速新增交易'}</h3>
+          <button onClick={onClose} className="p-2 text-gray-400 hover:text-black"><X className="w-5 h-5" /></button>
+        </div>
+
+        {!isEdit && (
+          <div className="bg-gray-50 p-4 rounded-2xl border border-gray-200 space-y-2">
+            <span className="text-xs font-bold text-gray-700 flex items-center gap-1"><Sparkles className="w-3.5 h-3.5 text-amber-500" /> 自然語言智慧記帳</span>
+            <div className="flex gap-2">
+              <input type="text" placeholder="例如：午餐 120" value={nlpInput} onChange={e => setNlpInput(e.target.value)} className="flex-1 bg-white p-2.5 rounded-xl text-xs border border-gray-200 outline-none" />
+              <button type="button" onClick={handleNlpParse} className="bg-gray-900 text-white text-xs px-3 py-2 rounded-xl font-medium">解析</button>
+            </div>
+            {nlpError && <p className="text-[10px] text-rose-500">{nlpError}</p>}
+            {nlpParsed && (
+              <div className="bg-white p-3 rounded-xl border border-amber-200 space-y-2 mt-2">
+                <span className="text-[10px] text-amber-600 font-bold block">AI 解析結果（請確認後寫入）：</span>
+                <div className="text-xs text-gray-800">項目：<span className="font-semibold">{nlpParsed.note}</span> ｜金額：<span className="font-semibold text-rose-500">{fmt(nlpParsed.amount)}</span> ｜分類：{nlpParsed.category}</div>
+                <button type="button" onClick={handleNlpConfirm} className="w-full bg-emerald-600 text-white text-xs py-2 rounded-lg font-semibold flex items-center justify-center gap-1"><Check className="w-3.5 h-3.5" /> 確認並寫入</button>
+              </div>
+            )}
+          </div>
+        )}
+
+        <div className="flex bg-gray-100 p-1 rounded-xl">
+          <button type="button" onClick={() => setType('expense')} className={`flex-1 py-2 text-xs font-semibold rounded-lg transition ${type === 'expense' ? 'bg-white shadow-sm text-black' : 'text-gray-500'}`}>支出</button>
+          <button type="button" onClick={() => setType('income')} className={`flex-1 py-2 text-xs font-semibold rounded-lg transition ${type === 'income' ? 'bg-white shadow-sm text-emerald-600' : 'text-gray-500'}`}>收入</button>
+        </div>
+
+        <form onSubmit={handleSubmit} className="space-y-4">
+          <div>
+            <label className="text-xs font-semibold text-gray-500">金額</label>
+            <input type="number" min="0.01" step="0.01" required placeholder="0" value={amount} onChange={e => setAmount(e.target.value)} className="w-full mt-1 p-3 bg-gray-50 rounded-xl text-lg font-bold border border-gray-200 outline-none focus:border-black" />
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className="text-xs font-semibold text-gray-500">分類</label>
+              <select value={category} onChange={e => setCategory(e.target.value)} className="w-full mt-1 p-3 bg-gray-50 rounded-xl text-xs border border-gray-200 outline-none">
+                {activeCategories.map(c => <option key={c.id} value={c.name}>{c.icon} {c.name}</option>)}
+              </select>
+            </div>
+            <div>
+              <label className="text-xs font-semibold text-gray-500">帳戶</label>
+              <select value={account} onChange={e => setAccount(e.target.value)} className="w-full mt-1 p-3 bg-gray-50 rounded-xl text-xs border border-gray-200 outline-none">
+                {accounts.map(a => <option key={a.id} value={a.name}>{a.name}</option>)}
+              </select>
+            </div>
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className="text-xs font-semibold text-gray-500">日期</label>
+              <input type="date" required value={date} onChange={e => setDate(e.target.value)} className="w-full mt-1 p-3 bg-gray-50 rounded-xl text-xs border border-gray-200 outline-none" />
+            </div>
+            <div>
+              <label className="text-xs font-semibold text-gray-500">用途</label>
+              <input list="purpose-options" value={purpose} onChange={e => setPurpose(e.target.value)} className="w-full mt-1 p-3 bg-gray-50 rounded-xl text-xs border border-gray-200 outline-none" />
+              <datalist id="purpose-options">{purposes.map(p => <option key={p} value={p} />)}</datalist>
+            </div>
+          </div>
+          <div>
+            <label className="text-xs font-semibold text-gray-500">備忘錄</label>
+            <input type="text" placeholder="例如：跟朋友聚餐" value={note} onChange={e => setNote(e.target.value)} className="w-full mt-1 p-3 bg-gray-50 rounded-xl text-xs border border-gray-200 outline-none" />
+          </div>
+          <div className="flex items-center gap-2 pt-1">
+            <input type="checkbox" id="importantCheck" checked={important} onChange={e => setImportant(e.target.checked)} className="w-4 h-4 rounded text-black accent-black" />
+            <label htmlFor="importantCheck" className="text-xs font-medium text-gray-700">設為重要釘選支出</label>
+          </div>
+
+          {error && <p className="text-xs text-rose-500 font-medium">{error}</p>}
+
+          <button type="submit" className="w-full py-3.5 bg-black text-white text-xs font-bold rounded-2xl hover:bg-gray-800 transition shadow-md">{isEdit ? '儲存變更' : '儲存交易'}</button>
+        </form>
+      </div>
+    </div>
+  );
+}
+
+function TransactionDetailModal({ tx, onClose, onDelete, onTogglePin, onEdit }) {
+  return (
+    <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+      <div className="bg-white w-full max-w-sm rounded-3xl p-6 space-y-4">
+        <div className="flex justify-between items-center">
+          <h3 className="font-bold text-gray-900 text-base">交易詳細資訊</h3>
+          <button onClick={onClose} className="p-2 text-gray-400 hover:text-black"><X className="w-5 h-5" /></button>
+        </div>
+        <div className="bg-gray-50 p-4 rounded-2xl space-y-3 text-xs">
+          <div className="flex justify-between"><span className="text-gray-400">類型</span><span className="font-semibold">{tx.type === 'income' ? '收入' : '支出'}</span></div>
+          <div className="flex justify-between"><span className="text-gray-400">金額</span><span className="font-bold text-sm">{fmt(tx.amount)}</span></div>
+          <div className="flex justify-between"><span className="text-gray-400">分類</span><span className="font-semibold">{tx.category}</span></div>
+          <div className="flex justify-between"><span className="text-gray-400">帳戶</span><span className="font-semibold">{tx.account}</span></div>
+          <div className="flex justify-between"><span className="text-gray-400">日期</span><span className="font-semibold">{tx.date}</span></div>
+          <div className="flex justify-between"><span className="text-gray-400">用途</span><span className="font-semibold">{tx.purpose}</span></div>
+          <div className="flex justify-between"><span className="text-gray-400">備忘</span><span className="font-semibold">{tx.note || '無'}</span></div>
+        </div>
+        <div className="flex gap-2">
+          <button onClick={() => onEdit(tx)} className="flex-1 bg-gray-100 text-gray-700 py-2.5 rounded-xl text-xs font-semibold hover:bg-gray-200 transition flex items-center justify-center gap-1"><Edit3 className="w-3.5 h-3.5" /> 編輯</button>
+          <button onClick={() => onTogglePin(tx.id)} className="flex-1 bg-amber-50 text-amber-700 py-2.5 rounded-xl text-xs font-semibold hover:bg-amber-100 transition">{tx.important ? '取消釘選' : '📌 設為重要'}</button>
+        </div>
+        <button onClick={() => onDelete(tx.id)} className="w-full bg-rose-50 text-rose-600 py-2.5 rounded-xl text-xs font-semibold hover:bg-rose-100 transition flex items-center justify-center gap-1"><Trash2 className="w-3.5 h-3.5" /> 刪除交易</button>
+      </div>
+    </div>
+  );
+}
+
+function SettingsModal({ rules, setRules, categories, setCategories, incomeCategories, setIncomeCategories, accounts, setAccounts, purposes, setPurposes, allocations, setAllocations, gamification, onClose, onResetAll, askAlert }) {
+  const [tab, setTab] = useState('rules');
+
+  return (
+    <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-end sm:items-center justify-center p-0 sm:p-4">
+      <div className="bg-white w-full max-w-md rounded-t-3xl sm:rounded-3xl p-6 space-y-4 max-h-[90vh] overflow-y-auto">
+        <div className="flex justify-between items-center">
+          <h3 className="font-bold text-gray-900 text-base">設定</h3>
+          <button onClick={onClose} className="p-2 text-gray-400 hover:text-black"><X className="w-5 h-5" /></button>
+        </div>
+
+        <div className="flex gap-1.5 overflow-x-auto pb-1">
+          {[['rules', '規則'], ['expense', '支出分類'], ['income', '收入分類'], ['accounts', '帳戶'], ['allocations', '資金分配'], ['data', '資料']].map(([k, label]) => (
+            <button key={k} onClick={() => setTab(k)} className={`shrink-0 text-[11px] px-3 py-1.5 rounded-full font-medium transition ${tab === k ? 'bg-black text-white' : 'bg-gray-100 text-gray-500'}`}>{label}</button>
+          ))}
+        </div>
+
+        {tab === 'rules' && <RulesTab rules={rules} setRules={setRules} gamification={gamification} askAlert={askAlert} />}
+        {tab === 'expense' && <CategoryTab list={categories} setList={setCategories} />}
+        {tab === 'income' && <CategoryTab list={incomeCategories} setList={setIncomeCategories} />}
+        {tab === 'accounts' && <AccountsTab accounts={accounts} setAccounts={setAccounts} />}
+        {tab === 'allocations' && <AllocationsTab allocations={allocations} setAllocations={setAllocations} purposes={purposes} setPurposes={setPurposes} askAlert={askAlert} />}
+        {tab === 'data' && <DataTab onResetAll={onResetAll} />}
+      </div>
+    </div>
+  );
+}
+
+function RulesTab({ rules, setRules, gamification, askAlert }) {
+  const [rew, setRew] = useState(rules.rewardPct);
+  const [sav, setSav] = useState(rules.savingsPct);
+  const [car, setCar] = useState(rules.carryOverPct);
+
+  const handleSave = (e) => {
+    e.preventDefault();
+    if (rew + sav + car !== 100) { askAlert('三者總和必須等於 100%！'); return; }
+    setRules({ rewardPct: rew, savingsPct: sav, carryOverPct: car });
+  };
+
+  return (
+    <div className="space-y-4 text-xs">
+      <div className="bg-gray-50 p-4 rounded-2xl space-y-1">
+        <span className="font-bold text-gray-700 block">遊戲化狀態</span>
+        <div>累積 XP：{gamification.xp} XP（Lv.{Math.floor(gamification.xp / 200) + 1}）</div>
+        <div>連續打卡：{gamification.streak} 天</div>
+      </div>
+      <form onSubmit={handleSave} className="space-y-3">
+        <span className="font-bold text-gray-700 block">今日結餘分配比例（總和需為 100%）</span>
+        <div><label className="text-gray-500">獎勵比例 (%)</label><input type="number" value={rew} onChange={e => setRew(Number(e.target.value))} className="w-full mt-1 p-2.5 bg-gray-50 rounded-xl border border-gray-200 outline-none" /></div>
+        <div><label className="text-gray-500">儲蓄比例 (%)</label><input type="number" value={sav} onChange={e => setSav(Number(e.target.value))} className="w-full mt-1 p-2.5 bg-gray-50 rounded-xl border border-gray-200 outline-none" /></div>
+        <div><label className="text-gray-500">結轉比例 (%)</label><input type="number" value={car} onChange={e => setCar(Number(e.target.value))} className="w-full mt-1 p-2.5 bg-gray-50 rounded-xl border border-gray-200 outline-none" /></div>
+        <button type="submit" className="w-full py-3 bg-black text-white rounded-xl font-bold hover:bg-gray-800 transition">儲存規則</button>
+      </form>
+    </div>
+  );
+}
+
+function CategoryTab({ list, setList }) {
+  const update = (id, field, value) => setList(prev => prev.map(c => c.id === id ? { ...c, [field]: value } : c));
+  const remove = (id) => setList(prev => prev.filter(c => c.id !== id));
+  const add = () => setList(prev => [...prev, { id: uid('cat'), name: '新分類', icon: '🏷️', color: '#999999' }]);
+
+  return (
+    <div className="space-y-2">
+      {list.map(c => (
+        <div key={c.id} className="flex items-center gap-2 bg-gray-50 p-2.5 rounded-xl">
+          <input type="color" value={c.color} onChange={e => update(c.id, 'color', e.target.value)} className="w-8 h-8 rounded-lg border-0 shrink-0" />
+          <input type="text" value={c.icon} onChange={e => update(c.id, 'icon', e.target.value)} maxLength={2} className="w-10 text-center text-sm bg-white rounded-lg border border-gray-200 p-1.5 shrink-0" />
+          <input type="text" value={c.name} onChange={e => update(c.id, 'name', e.target.value)} className="flex-1 text-xs bg-white rounded-lg border border-gray-200 p-2" />
+          <button onClick={() => remove(c.id)} className="p-1.5 text-rose-400 hover:text-rose-600 shrink-0"><Trash2 className="w-4 h-4" /></button>
+        </div>
+      ))}
+      <button onClick={add} className="w-full py-2.5 border border-dashed border-gray-300 rounded-xl text-xs text-gray-500 hover:bg-gray-50 flex items-center justify-center gap-1"><Plus className="w-3.5 h-3.5" /> 新增分類</button>
+    </div>
+  );
+}
+
+function AccountsTab({ accounts, setAccounts }) {
+  const update = (id, name) => setAccounts(prev => prev.map(a => a.id === id ? { ...a, name } : a));
+  const remove = (id) => setAccounts(prev => prev.filter(a => a.id !== id));
+  const add = () => setAccounts(prev => [...prev, { id: uid('acc'), name: '新帳戶' }]);
+
+  return (
+    <div className="space-y-2">
+      {accounts.map(a => (
+        <div key={a.id} className="flex items-center gap-2 bg-gray-50 p-2.5 rounded-xl">
+          <Users className="w-4 h-4 text-gray-400 shrink-0" />
+          <input type="text" value={a.name} onChange={e => update(a.id, e.target.value)} className="flex-1 text-xs bg-white rounded-lg border border-gray-200 p-2" />
+          <button onClick={() => remove(a.id)} className="p-1.5 text-rose-400 hover:text-rose-600 shrink-0"><Trash2 className="w-4 h-4" /></button>
+        </div>
+      ))}
+      <button onClick={add} className="w-full py-2.5 border border-dashed border-gray-300 rounded-xl text-xs text-gray-500 hover:bg-gray-50 flex items-center justify-center gap-1"><Plus className="w-3.5 h-3.5" /> 新增帳戶</button>
+    </div>
+  );
+}
+
+function AllocationsTab({ allocations, setAllocations, purposes, setPurposes, askAlert }) {
+  const [amount, setAmount] = useState('');
+  const [purpose, setPurpose] = useState(purposes[0]);
+  const [startDate, setStartDate] = useState(todayISO());
+  const [endDate, setEndDate] = useState(addDaysISO(todayISO(), 29));
+
+  const handleAdd = (e) => {
+    e.preventDefault();
+    const amt = Number(amount);
+    if (!amt || amt <= 0) { askAlert('請輸入大於 0 的金額。'); return; }
+    if (endDate < startDate) { askAlert('結束日期不能早於開始日期。'); return; }
+    if (!purposes.includes(purpose)) setPurposes(prev => [...prev, purpose]);
+    setAllocations(prev => [...prev, { id: uid('alloc'), amount: amt, purpose, startDate, endDate }]);
+    setAmount('');
+  };
+
+  const remove = (id) => setAllocations(prev => prev.filter(a => a.id !== id));
+
+  return (
+    <div className="space-y-4">
+      <form onSubmit={handleAdd} className="bg-gray-50 p-4 rounded-2xl space-y-2">
+        <span className="text-xs font-bold text-gray-700 block">新增資金分配（金額＋用途＋期間）</span>
+        <input type="number" min="1" placeholder="金額" value={amount} onChange={e => setAmount(e.target.value)} className="w-full p-2.5 bg-white rounded-xl text-xs border border-gray-200 outline-none" />
+        <input list="alloc-purpose-options" placeholder="用途" value={purpose} onChange={e => setPurpose(e.target.value)} className="w-full p-2.5 bg-white rounded-xl text-xs border border-gray-200 outline-none" />
+        <datalist id="alloc-purpose-options">{purposes.map(p => <option key={p} value={p} />)}</datalist>
+        <div className="grid grid-cols-2 gap-2">
+          <input type="date" value={startDate} onChange={e => setStartDate(e.target.value)} className="p-2.5 bg-white rounded-xl text-xs border border-gray-200 outline-none" />
+          <input type="date" value={endDate} onChange={e => setEndDate(e.target.value)} className="p-2.5 bg-white rounded-xl text-xs border border-gray-200 outline-none" />
+        </div>
+        <button type="submit" className="w-full py-2.5 bg-black text-white rounded-xl text-xs font-bold">新增</button>
+      </form>
+
+      <div className="space-y-2">
+        {allocations.map(a => (
+          <div key={a.id} className="bg-white border border-gray-100 rounded-2xl p-3 space-y-1">
+            <div className="flex justify-between items-center">
+              <span className="text-xs font-bold text-gray-800 flex items-center gap-1"><CalendarRange className="w-3.5 h-3.5" /> {a.purpose}</span>
+              <button onClick={() => remove(a.id)} className="text-rose-400 hover:text-rose-600"><Trash2 className="w-3.5 h-3.5" /></button>
+            </div>
+            <span className="text-[10px] text-gray-400 block">{a.startDate} ～ {a.endDate}（共 {a.totalDays} 天）</span>
+            <div className="flex justify-between text-[11px]">
+              <span>剩餘 {fmt(a.remainingMoney)} ・ {a.remainingDays} 天</span>
+              <span className="font-bold" style={{ color: STATUS_COLORS[a.status] }}>每日 {fmt(a.dailyBudget)}</span>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function DataTab({ onResetAll }) {
+  return (
+    <div className="space-y-3">
+      <p className="text-xs text-gray-500 leading-relaxed">
+        所有資料會自動儲存在這個 App 的持久化儲存空間中，重新開啟聊天視窗也不會遺失。
+      </p>
+      <button onClick={onResetAll} className="w-full py-3 bg-rose-50 text-rose-600 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 hover:bg-rose-100 transition">
+        <RotateCcw className="w-4 h-4" /> 清除並重設為範例資料
+      </button>
+    </div>
+  );
+}
+
